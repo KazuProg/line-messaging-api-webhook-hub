@@ -1,0 +1,6 @@
+# 環境変数（シークレット含む）
+.env
+
+# SQLite データ（永続化は docker volume / ./data で行う）
+*.db
+data/
