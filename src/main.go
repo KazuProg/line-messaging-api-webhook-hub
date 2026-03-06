@@ -22,6 +22,7 @@ import (
 const (
 	defaultPort        = "80"
 	defaultDBPath      = "/data/webhook.db"
+	defaultClientsFile = "/data/clients.json"
 	maxRequestBodySize = 1 << 20 // 1MB
 )
 
@@ -32,13 +33,15 @@ type webhookPayload struct {
 }
 
 type appConfig struct {
-	Port           string
-	DBPath         string
-	ChannelSecret  string
-	Logger         *slog.Logger
-	DB             *sql.DB
-	HTTPClient     *http.Client
-	RequestTimeout time.Duration
+	Port            string
+	DBPath          string
+	ClientsFilePath string
+	ChannelSecret   string
+	Logger          *slog.Logger
+	DB              *sql.DB
+	Clients         *clientStore
+	HTTPClient      *http.Client
+	RequestTimeout  time.Duration
 }
 
 func main() {
@@ -69,13 +72,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := warnIfNoClients(db, logger); err != nil {
-		logger.Error("failed to check clients table", "error", err.Error())
+	clients, err := newClientStore(cfg.ClientsFilePath, logger)
+	if err != nil {
+		logger.Error("failed to load clients store", "error", err.Error())
+		os.Exit(1)
 	}
+	cfg.Clients = clients
 
 	mux := http.NewServeMux()
 	mux.Handle("/callback", callbackHandler(cfg))
 	mux.Handle("/health", healthHandler())
+	mux.Handle("/clients", clientsHandler(cfg))
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -101,17 +108,23 @@ func newConfig(logger *slog.Logger) (*appConfig, error) {
 		dbPath = defaultDBPath
 	}
 
+	clientsFile := os.Getenv("CLIENTS_FILE")
+	if clientsFile == "" {
+		clientsFile = defaultClientsFile
+	}
+
 	secret := os.Getenv("LINE_CHANNEL_SECRET")
 	if secret == "" {
 		logger.Warn("LINE_CHANNEL_SECRET is not set; signature verification will always fail")
 	}
 
 	return &appConfig{
-		Port:           port,
-		DBPath:         dbPath,
-		ChannelSecret:  secret,
-		Logger:         logger,
-		RequestTimeout: 5 * time.Second,
+		Port:            port,
+		DBPath:          dbPath,
+		ClientsFilePath: clientsFile,
+		ChannelSecret:   secret,
+		Logger:          logger,
+		RequestTimeout:  5 * time.Second,
 	}, nil
 }
 
@@ -138,30 +151,12 @@ func initSchema(db *sql.DB, logger *slog.Logger) error {
 CREATE TABLE IF NOT EXISTS webhooks (
 	id TEXT PRIMARY KEY,
 	payload TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS clients (
-	id INTEGER PRIMARY KEY,
-	name TEXT NOT NULL,
-	webhook_url TEXT NOT NULL,
-	is_active INTEGER DEFAULT 1
 );`
 
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
 	logger.Info("database schema initialized")
-	return nil
-}
-
-func warnIfNoClients(db *sql.DB, logger *slog.Logger) error {
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM clients WHERE is_active = 1`).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		logger.Warn("no active clients found; webhook events will be archived only")
-	}
 	return nil
 }
 
@@ -213,6 +208,85 @@ func healthHandler() http.Handler {
 	})
 }
 
+// clientRequest is the JSON body for POST/DELETE /clients.
+type clientRequest struct {
+	WebhookURL string `json:"webhook_url"`
+}
+
+const clientsAllowMethods = "GET, POST, DELETE"
+
+func clientsHandler(cfg *appConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		switch r.Method {
+		case http.MethodGet:
+			list := cfg.Clients.List()
+			if list == nil {
+				list = []string{}
+			}
+			_ = json.NewEncoder(w).Encode(list)
+
+		case http.MethodPost:
+			var req clientRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid JSON"}`))
+				return
+			}
+			if req.WebhookURL == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"webhook_url is required"}`))
+				return
+			}
+			added, err := cfg.Clients.Add(req.WebhookURL)
+			if err != nil {
+				cfg.Logger.Error("failed to add client", "error", err.Error())
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
+			if !added {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":"webhook_url already registered"}`))
+				return
+			}
+			cfg.Logger.Info("client registered", "webhook_url", req.WebhookURL)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"webhook_url": req.WebhookURL})
+
+		case http.MethodDelete:
+			var req clientRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid JSON"}`))
+				return
+			}
+			if req.WebhookURL == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"webhook_url is required"}`))
+				return
+			}
+			removed, err := cfg.Clients.Remove(req.WebhookURL)
+			if err != nil {
+				cfg.Logger.Error("failed to remove client", "error", err.Error())
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
+			if !removed {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"client not found"}`))
+				return
+			}
+			cfg.Logger.Info("client removed", "webhook_url", req.WebhookURL)
+			w.WriteHeader(http.StatusNoContent)
+
+		default:
+			w.Header().Set("Allow", clientsAllowMethods)
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		}
+	})
+}
+
 func verifySignature(secret, signature string, body []byte) bool {
 	if secret == "" {
 		// Without secret, verification is meaningless; fail closed.
@@ -256,27 +330,8 @@ func archiveWebhook(db *sql.DB, id, payload string) error {
 }
 
 func forwardToClients(cfg *appConfig, eventID string, body []byte) {
-	rows, err := cfg.DB.Query(`SELECT webhook_url FROM clients WHERE is_active = 1`)
-	if err != nil {
-		cfg.Logger.Error("failed to query clients", "error", err.Error(), "event_id", eventID)
-		return
-	}
-	defer rows.Close()
-
-	type client struct {
-		URL string
-	}
-	var clients []client
-	for rows.Next() {
-		var url string
-		if err := rows.Scan(&url); err != nil {
-			cfg.Logger.Error("failed to scan client row", "error", err.Error(), "event_id", eventID)
-			continue
-		}
-		clients = append(clients, client{URL: url})
-	}
-
-	for _, c := range clients {
+	urls := cfg.Clients.List()
+	for _, url := range urls {
 		go func(url string) {
 			ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
 			defer cancel()
@@ -300,7 +355,7 @@ func forwardToClients(cfg *appConfig, eventID string, body []byte) {
 			} else {
 				cfg.Logger.Error("forwarding failed", "event_id", eventID, "url", url, "status", resp.StatusCode)
 			}
-		}(c.URL)
+		}(url)
 	}
 }
 

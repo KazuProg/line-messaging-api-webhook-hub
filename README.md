@@ -7,11 +7,10 @@ LINE Messaging API の Webhook を受信・アーカイブし、複数の子 Web
 - `POST /callback` で LINE Webhook を受信
 - `x-line-signature` と `LINE_CHANNEL_SECRET` による HMAC-SHA256 署名検証
 - SQLite3 に Webhook ペイロードをアーカイブ（`webhooks` テーブル）
-- `clients` テーブルで定義された複数の転送先へ非同期 HTTP POST
+- 登録された転送先 URL 一覧（JSON ファイル + メモリ）へ非同期 HTTP POST
 - 転送結果を構造化 JSON ログ（`log/slog`）として標準出力に出力
 - `GET /health` のヘルスチェックエンドポイント
-
-詳細仕様は `spec.md` を参照してください。
+- **clients 管理の REST API**: `GET /clients`（一覧）、`POST /clients`（登録）、`DELETE /clients`（削除）
 
 ## 必要要件
 
@@ -22,6 +21,7 @@ LINE Messaging API の Webhook を受信・アーカイブし、複数の子 Web
 
 - `LINE_CHANNEL_SECRET` (必須): LINE チャネルシークレット。署名検証に使用します。
 - `DB_PATH` (任意): SQLite DB ファイルパス。デフォルトは `/data/webhook.db`。
+- `CLIENTS_FILE` (任意): 転送先 URL 一覧を保存する JSON ファイルパス。デフォルトは `/data/clients.json`。起動時に読み込み、追加時に書き戻します。
 - `PORT` (任意): HTTP リッスンポート。デフォルトは `8080`。
 
 ## 起動方法（Docker Compose）
@@ -35,22 +35,40 @@ docker compose up --build
 
 - Webhook 受信: `POST http://localhost:8080/callback`
 - ヘルスチェック: `GET http://localhost:8080/health`
+- クライアント一覧: `GET http://localhost:8080/clients`
+- クライアント登録: `POST http://localhost:8080/clients`
+- クライアント削除: `DELETE http://localhost:8080/clients`（下記参照）
 
-### Cloudflare Tunnel (cloudflared)
+## clients 管理 REST API
 
-`docker compose up` で **cloudflared** も起動し、webhook-hub をインターネットに公開します。
+転送先は **Webhook URL の配列** のみ管理します。起動時に `CLIENTS_FILE`（JSON）を読みメモリに保持し、リクエストごとの参照はメモリのみ。追加時に JSON へ書き戻して永続化します。
 
-- **クイックトンネル（デフォルト）**: 起動後、cloudflared のログに `https://xxxxx.trycloudflare.com` のような URL が表示されます。LINE の Webhook URL にこのアドレス + `/callback` を設定してください。
-- **名前付きトンネル**: 固定ドメインを使う場合は、Cloudflare Zero Trust でトンネルを作成し発行されたトークンを `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定。`docker-compose.yml` の cloudflared の `command` を `tunnel run --token $$CLOUDFLARE_TUNNEL_TOKEN` に変更して起動してください。
+### 一覧取得 `GET /clients`
 
-## clients テーブルの管理
+登録済み転送先 URL の配列を JSON で返します。
 
-初期バージョンでは、`clients` テーブルは手動で管理します。例:
-
-```sql
-INSERT INTO clients (name, webhook_url, is_active)
-VALUES ('sample-bot', 'http://child-bot:8000/hook', 1);
+```bash
+curl -s http://localhost:8080/clients
+# 例: ["http://my-client:8080/webhook"]
 ```
 
-将来的に API 経由での管理を追加する余地がありますが、現時点ではスコープ外です。
+### 登録 `POST /clients`
+
+転送先 URL を 1 件追加します。Body は JSON で `webhook_url` が必須です。
+
+```bash
+curl -s -X POST http://localhost:8080/clients \
+  -H "Content-Type: application/json" \
+  -d '{"webhook_url":"http://my-client:8080/webhook"}'
+```
+
+### 削除 `DELETE /clients`
+
+転送先 URL を 1 件削除します。Body は JSON で `webhook_url` を指定します。存在しない URL の場合は `404 Not Found` を返します。削除成功時は `204 No Content` です。
+
+```bash
+curl -s -X DELETE http://localhost:8080/clients \
+  -H "Content-Type: application/json" \
+  -d '{"webhook_url":"http://my-client:8080/webhook"}'
+```
 
