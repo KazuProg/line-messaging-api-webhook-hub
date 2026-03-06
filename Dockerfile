@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN apk add --no-cache build-base
 
-COPY . ./
+COPY src/ ./
 RUN go mod download
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /webhook-hub .
 
