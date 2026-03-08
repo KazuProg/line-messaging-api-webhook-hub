@@ -131,6 +131,13 @@ func callbackHandler(cfg *appConfig) http.Handler {
 			return
 		}
 
+		urls := cfg.Clients.List()
+		if len(urls) == 0 {
+			cfg.Logger.Warn("no webhook clients registered; rejecting webhook")
+			http.Error(w, "no webhook clients registered", http.StatusServiceUnavailable)
+			return
+		}
+
 		eventID := extractEventID(body)
 		go forwardToClients(cfg, eventID, body)
 
