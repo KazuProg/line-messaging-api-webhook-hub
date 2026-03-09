@@ -208,7 +208,9 @@ func clientsHandler(cfg *appConfig) http.Handler {
 			_, err := cfg.Clients.Add(req.WebhookURL, req.Required)
 			if err != nil {
 				cfg.Logger.Error("failed to add client", "error", err.Error())
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"internal error"}`))
 				return
 			}
 			cfg.Logger.Info("client registered", "webhook_url", req.WebhookURL, "required", req.Required)
@@ -231,7 +233,9 @@ func clientsHandler(cfg *appConfig) http.Handler {
 			removed, err := cfg.Clients.Remove(req.WebhookURL)
 			if err != nil {
 				cfg.Logger.Error("failed to remove client", "error", err.Error())
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"internal error"}`))
 				return
 			}
 			if !removed {
