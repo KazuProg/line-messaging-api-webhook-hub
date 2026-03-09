@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -293,7 +294,7 @@ func forwardToRequiredSync(cfg *appConfig, eventID string, body []byte, required
 			ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
 			defer cancel()
 
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, io.NopCloser(io.LimitReader(io.MultiReader(bytesReader(body)), int64(len(body)))))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, io.NopCloser(bytes.NewReader(body)))
 			if err != nil {
 				cfg.Logger.Error("failed to create forwarding request", "error", err.Error(), "event_id", eventID, "url", url)
 				firstErrMu.Lock()
@@ -339,7 +340,7 @@ func forwardToClients(cfg *appConfig, eventID string, body []byte, clients []Cli
 			ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
 			defer cancel()
 
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, io.NopCloser(io.LimitReader(io.MultiReader(bytesReader(body)), int64(len(body)))))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, io.NopCloser(bytes.NewReader(body)))
 			if err != nil {
 				cfg.Logger.Error("failed to create forwarding request", "error", err.Error(), "event_id", eventID, "url", url)
 				return
@@ -362,20 +363,3 @@ func forwardToClients(cfg *appConfig, eventID string, body []byte, clients []Cli
 	}
 }
 
-func bytesReader(b []byte) io.Reader {
-	return &byteSliceReader{b: b}
-}
-
-type byteSliceReader struct {
-	b []byte
-	i int64
-}
-
-func (r *byteSliceReader) Read(p []byte) (int, error) {
-	if r.i >= int64(len(r.b)) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.i:])
-	r.i += int64(n)
-	return n, nil
-}
